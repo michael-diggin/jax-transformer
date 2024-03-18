@@ -10,17 +10,26 @@ class OptState(NamedTuple):
     momentums: list[jax.Array] = []
     velocities: list[jax.Array] = []
 
+@register_pytree_node_class
 class VanillaSGD:
     def __init__(self, lr_func) -> None:
         self.lr_func = lr_func
 
+    def tree_flatten(self):
+        return [], [self.lr_func]
+    
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        return cls(*aux_data)
+
     @jax.jit
     def apply_grads(self, params, grads, state: OptState):
-        lr = self.lr_func(state.train_iter)
+        step = state.train_iter + 1
+        lr = self.lr_func(step)
         new_params = jax.tree_map(
             lambda param, g: param - lr*g, params, grads
         )
-        state.train_iter = state.train_iter + 1
+        state = OptState(train_iter=step)
         return new_params, state
     
     def init_state(self, dummy_params) -> OptState:
@@ -53,16 +62,16 @@ class Adam(object):
         def update_momentum(m, g):
             g = jnp.clip(g, -self.clip, self.clip)
             m = self.beta1*m + (1-self.beta1)*g
-            return m / (1 - self.beta1**t)
+            return m / (1 - jnp.power(self.beta1, t))
         
         def update_velocity(v, g):
             g = jnp.clip(g, -self.clip, self.clip)
-            v = self.beta2*v + (1-self.beta2)*(g**2)
-            return v / (1 - self.beta2**t)
+            v = self.beta2*v + (1-self.beta2)*(jnp.power(g, 2))
+            return v / (1 - jnp.power(self.beta2, t))
 
         grad_leaves, grad_tree_def = jax.tree_util.tree_flatten(grads)
 
-        # TODO: it would be good if both of these could be done together
+        # TODO: it would be nice if both of these could be done together
         new_momentum = jax.tree_util.tree_map(
             update_momentum, state.momentums, grad_leaves
         )
@@ -98,13 +107,18 @@ class Adam(object):
 def standard_lr(base_lr: int):
     return lambda x: base_lr
 
-def consine_lr_decay(base_lr: int, warm_up: int, max_iters: int):
+def cosine_lr_decay(base_lr: int, min_lr: int, warm_up: int, decay_iters: int):
     '''
     Returns a function(int) -> LR, which returns the learning rate given
     '''
     # Create function to return lr based on iteration count
     def get_lr(train_iter):
-        lr_factor = 0.5 * (1 + jnp.cos(jnp.pi * train_iter / max_iters))
-        lr_factor = jnp.where(train_iter <= warm_up, lr_factor*train_iter * 1.0 / warm_up, lr_factor)
-        return lr_factor * base_lr
+
+        wu_lr = base_lr * train_iter / warm_up
+        lr_factor = 0.5 * (1 + jnp.cos(jnp.pi * (train_iter - warm_up) / (decay_iters - warm_up)))
+        decay_lr = min_lr + lr_factor * (base_lr - min_lr)
+
+        lr = jnp.where(train_iter <= warm_up, wu_lr, decay_lr)
+        lr = jnp.where(train_iter >= decay_iters, min_lr, lr)
+        return lr
     return get_lr

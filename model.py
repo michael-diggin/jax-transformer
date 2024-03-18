@@ -6,23 +6,29 @@ import modules as mod
 
 @register_pytree_node_class
 class JaxFormer(mod.BaseModule):
-    def __init__(self, embedding: mod.Embedding, transformers: list[mod.Transformer], lm_head: mod.Dense, *args):
+    def __init__(self, embedding: mod.Embedding, drop: mod.Dropout, transformers: list[mod.Transformer], norm: mod.LayerNorm, lm_head: mod.Dense, *args):
         self.embedding = embedding
+        self.drop = drop
         self.transformers = transformers
+        self.norm = norm
         self.lm_head = lm_head
 
     def params(self):
-        return [self.embedding, self.transformers, self.lm_head]
+        return [self.embedding, self.drop, self.transformers, self.norm, self.lm_head]
 
     @partial(jax.jit, static_argnames=["mask", "train"])
     def __call__(self, x: jax.Array, mask: bool, train: bool = False, rng: jax.Array = None) -> jax.Array:
         # x is (batch, seq_len)
         x = self.embedding(x) # (batch, seq_len, d_model), this includes the pos encodings
+        if train:
+            rng, drop_key = jax.random.split(rng)
+            x = self.drop(x, train, drop_key)
         block_rng = None
         for tformer in self.transformers:
             if train:
                 rng, block_rng = jax.random.split(rng)
             x = tformer(x, mask, train, block_rng) # (batch, seq_len, d_model)
+        x = self.norm(x)
         x = self.lm_head(x) # (batch, seq_len, vocab_size)
         return x
 
@@ -31,9 +37,11 @@ class JaxFormer(mod.BaseModule):
             num_blocks: int, heads: int, hidden_dim: int, dropout_prob: int):
         rng, e_key, dense_key = jax.random.split(rng, 3)
         embed = mod.Embedding.init(e_key, max_seq_len, d_model, vocab_size)
+        drop = mod.Dropout.init(dropout_prob)
         d_blocks = []
         for _ in range(num_blocks):
             rng, block_key = jax.random.split(rng)
             d_blocks.append(mod.Transformer.init(block_key, d_model, heads, hidden_dim, dropout_prob))
+        norm = mod.LayerNorm.init(d_model)
         lm_head = mod.Dense.init(dense_key, d_model, vocab_size)
-        return cls(embed, d_blocks, lm_head)
+        return cls(embed, drop, d_blocks, norm, lm_head)

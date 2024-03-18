@@ -43,7 +43,7 @@ class TrainingDataset:
     def decoder(self):
         if not self.int_ch:
             self._process()
-        dec = lambda x: ''.join([self.int_ch[i] for i in x])
+        dec = lambda x: ''.join([self.int_ch[int(i)] for i in x])
         return dec
     
     def _train_val_split(self):

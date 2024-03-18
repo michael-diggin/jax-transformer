@@ -67,7 +67,7 @@ class Embedding(BaseModule):
     
     @classmethod
     def init(cls, rng: jax.Array, max_seq_len: int, embedding_dim: int, vocab_size: int):
-        embedding = jax.random.normal(rng, (vocab_size, embedding_dim))
+        embedding = jax.random.normal(rng, (vocab_size, embedding_dim)) / jnp.sqrt(embedding_dim) # TODO: check this init
         pos_encoding = cls.create_pe(max_seq_len, embedding_dim)
         return cls(embedding, pos_encoding)
     
@@ -97,11 +97,8 @@ class Dense(BaseModule):
     
     @classmethod
     def init(cls, rng: jax.Array, input: int, features: int):
-        w_key, b_key = jax.random.split(rng)
-        # TODO: have other/better initilizations
-        # eg Xavier init
-        weights = jax.random.normal(w_key, (input, features))
-        bias = jax.random.normal(b_key, (features,))
+        weights = jax.random.normal(rng, (input, features)) / jnp.sqrt(input)
+        bias = jnp.zeros((features,))
         return cls(weights, bias)
 
 @register_pytree_node_class
@@ -160,21 +157,22 @@ class Dropout(BaseModule):
 
 @register_pytree_node_class
 class MultiHeadAttention(BaseModule):
-    def __init__(self, W_q: Dense, W_k: Dense, W_v: Dense, W_o: Dense, heads: int, *args) -> None:
+    def __init__(self, W_q: Dense, W_k: Dense, W_v: Dense, W_o: Dense, drop: Dropout, heads: int, *args) -> None:
         self.W_q = W_q
         self.W_k = W_k
         self.W_v = W_v
         self.W_o = W_o
+        self.drop = drop
         self.heads = heads
 
     def params(self) -> list[jax.Array]:
-        return [self.W_q, self.W_k, self.W_v, self.W_o]
+        return [self.W_q, self.W_k, self.W_v, self.W_o, self.drop]
     
     def aux_data(self) -> jax.Array:
         return self.heads
     
-    @partial(jax.jit, static_argnames=["mask"])
-    def __call__(self, x: jax.Array, mask: bool = False) -> jax.Array:
+    @partial(jax.jit, static_argnames=["mask", "train"])
+    def __call__(self, x: jax.Array, mask: bool = False, train: bool = False, rng: jax.Array = None) -> jax.Array:
         # x is (batch size, seq_len, d_model)
         batch, seq_len, d_model = jnp.shape(x)
         q = self.W_q(x).reshape(batch, seq_len, self.heads, -1) # (batch, seq_len, heads, d_k)
@@ -184,19 +182,21 @@ class MultiHeadAttention(BaseModule):
         q = q.transpose(0, 2, 1, 3) # (batch, heads, seq_len, d_k)
         k = k.transpose(0, 2, 1, 3) # (batch, heads, seq_len, d_k)
         v = v.transpose(0, 2, 1, 3) # (batch, heads, seq_len, d_k)
-        attn = self.scaled_dot_product(q, k, v, d_model // self.heads, mask) # (batch, heads, seq_len, d_k)
+        attn = self.scaled_dot_product(q, k, v, d_model // self.heads, mask, train, rng) # (batch, heads, seq_len, d_k)
         attn = attn.transpose(0, 2, 1, 3) # (batch, seq_len, heads, d_k)
         attn = attn.reshape(batch, seq_len, d_model)
         attn_o = self.W_o(attn) # (batch, seq_len, d_model)
         return attn_o
 
-    def scaled_dot_product(self, q: jax.Array, k: jax.Array, v: jax.Array, d_k: jax.Array, mask: bool) -> jax.Array:
+    def scaled_dot_product(self, q: jax.Array, k: jax.Array, v: jax.Array, d_k: jax.Array, mask: bool, train: bool, rng: jax.Array) -> jax.Array:
         # q, v, k have dim (batch, heads, seq_len, d_k)
         attn = jnp.matmul(q, jnp.swapaxes(k, -2, -1)) / jnp.sqrt(d_k) # (batch, heads, seq_len, seq_len)
         if mask:
             m_array = self.get_training_mask(q.shape[2])
-            attn = jnp.where(m_array == 0, -9e15, attn)
-        return jnp.matmul(jax.nn.softmax(attn, axis=-1), v) # (batch, heads, seq_len, d_k)
+            attn = jnp.where(m_array, attn, -9e15)
+        attn = jax.nn.softmax(attn, axis=-1)
+        attn = self.drop(attn, train, rng)
+        return jnp.matmul(attn, v) # (batch, heads, seq_len, d_k)
 
     def get_training_mask(self, seq_len: int) -> jax.Array:
         '''
@@ -207,7 +207,7 @@ class MultiHeadAttention(BaseModule):
         return jnp.expand_dims(mask, (0, 1))
 
     @classmethod
-    def init(cls, rng: jax.Array, heads: int, d_model: int):
+    def init(cls, rng: jax.Array, heads: int, d_model: int, drop_rate: jax.Array):
         # create all proj matrices, have d_keys = d_vals
         assert d_model % heads == 0, "Heads must divide the model dimension evenly"
         rng, q_key, k_key, v_key, o_key = jax.random.split(rng, 5)
@@ -215,7 +215,8 @@ class MultiHeadAttention(BaseModule):
         W_k = Dense.init(k_key, d_model, d_model)
         W_v = Dense.init(v_key, d_model, d_model)
         W_o = Dense.init(o_key, d_model, d_model)
-        return cls(W_q, W_k, W_v, W_o, heads)
+        drop = Dropout.init(drop_rate)
+        return cls(W_q, W_k, W_v, W_o, drop, heads)
     
 @register_pytree_node_class
 class Transformer(BaseModule):
@@ -243,22 +244,25 @@ class Transformer(BaseModule):
         pass to second dense layer back to d_model
         add and norm
         '''
-        rng_1, rng_2 = None, None
+        rng1, rng2, rng3 = None, None, None
         if train:
-            rng_1, rng_2 = jax.random.split(rng)
-        attn = self.mha(x, mask)
-        attn = self.dropout1(attn, train, rng_1)
-        x = self.norm1(x + attn)
+            rng1, rng2, rng3 = jax.random.split(rng, 3)
+        x = self.norm1(x)
+        attn = self.mha(x, mask, train, rng1)
+        attn = self.dropout1(attn, train, rng2)
+        x = self.norm2(x + attn)
+
         ff_out = self.dense1(x)
-        ff_out = jax.nn.relu(ff_out)
+        ff_out = jax.nn.gelu(ff_out) # TODO: a different activation func?
         ff_out = self.dense2(ff_out)
-        ff_out = self.dropout2(ff_out, train, rng_2)
-        return self.norm2(x + ff_out)
+        ff_out = self.dropout2(ff_out, train, rng3)
+
+        return x + ff_out
 
     @classmethod
     def init(cls, rng: jax.Array, d_model: int, heads: int, hidden_dim: int, dropout_prob: int):
         rng, mha_key, dense1_key, dense2_key = jax.random.split(rng, 4)
-        mha = MultiHeadAttention.init(mha_key, heads, d_model)
+        mha = MultiHeadAttention.init(mha_key, heads, d_model, dropout_prob)
         dense1 = Dense.init(dense1_key, d_model, hidden_dim)
         dense2 = Dense.init(dense2_key, hidden_dim, d_model)
         ln1 = LayerNorm.init(d_model)

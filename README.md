@@ -17,7 +17,8 @@ Other bits to do:
 - Implement LR warmup and decay (Done)
 - Define loss function (Done)
 - Implement data prep object (Done)
+- Implement training loops with validation (Done)
+- Implement regularisation with weight decay
+- Implement KV caching for fast decoding
 - Saving/checkpointing model weights and optimizer state
-- Implement training loops with validation
 - Profile and see what can be improved/made faster and see what gets recompiled unnecessarily
-- Investigate layer-by-layer gradient updates?
