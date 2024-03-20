@@ -16,8 +16,8 @@ class JaxFormer(mod.BaseModule):
     def params(self):
         return [self.embedding, self.drop, self.transformers, self.norm, self.lm_head]
 
-    @partial(jax.jit, static_argnames=["mask", "train"])
-    def __call__(self, x: jax.Array, mask: bool, train: bool = False, rng: jax.Array = None) -> jax.Array:
+    @partial(jax.jit, static_argnames=["train"])
+    def __call__(self, x: jax.Array, train: bool = False, rng: jax.Array = None) -> jax.Array:
         # x is (batch, seq_len)
         x = self.embedding(x) # (batch, seq_len, d_model), this includes the pos encodings
         if train:
@@ -27,7 +27,7 @@ class JaxFormer(mod.BaseModule):
         for tformer in self.transformers:
             if train:
                 rng, block_rng = jax.random.split(rng)
-            x = tformer(x, mask, train, block_rng) # (batch, seq_len, d_model)
+            x = tformer(x, train, block_rng) # (batch, seq_len, d_model)
         x = self.norm(x)
         x = self.lm_head(x) # (batch, seq_len, vocab_size)
         return x
@@ -44,4 +44,5 @@ class JaxFormer(mod.BaseModule):
             d_blocks.append(mod.Transformer.init(block_key, d_model, heads, hidden_dim, dropout_prob))
         norm = mod.LayerNorm.init(d_model)
         lm_head = mod.Dense.init(dense_key, d_model, vocab_size)
+        embed.embedding = jnp.transpose(lm_head.weights) # weight tying
         return cls(embed, drop, d_blocks, norm, lm_head)

@@ -18,7 +18,9 @@ Other bits to do:
 - Define loss function (Done)
 - Implement data prep object (Done)
 - Implement training loops with validation (Done)
-- Implement regularisation with weight decay
-- Implement KV caching for fast decoding
+- Implement regularisation with weight decay (Done)
+- Optionally remove bias parameters
+- Implement custom kernel init
 - Saving/checkpointing model weights and optimizer state
+- Implement KV caching for fast decoding
 - Profile and see what can be improved/made faster and see what gets recompiled unnecessarily

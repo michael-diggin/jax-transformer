@@ -7,8 +7,8 @@ import modules as mod
 
 class OptState(NamedTuple):
     train_iter: int = 0
-    momentums: list[jax.Array] = []
-    velocities: list[jax.Array] = []
+    momentums: mod.BaseModule = None
+    velocities: mod.BaseModule = None
 
 @register_pytree_node_class
 class VanillaSGD:
@@ -38,23 +38,35 @@ class VanillaSGD:
 # TODO: this only needs to be a pytree for tracing reasons, see if there's a better way to achieve this
 @register_pytree_node_class
 class Adam(object):
-    def __init__(self, lr_func, beta1: jax.Array = 0.9, beta2: jax.Array = 0.995, grad_clip: jax.Array = jnp.inf) -> None:
+    def __init__(self, lr_func, beta1: jax.Array = 0.9, beta2: jax.Array = 0.99,
+                 grad_clip: jax.Array = jnp.inf, weight_decay: jax.Array = 0.) -> None:
+        self.lr_func = lr_func
         self.beta1 = beta1
         self.beta2 = beta2
         self.clip = grad_clip
-        self.lr_func = lr_func
+        self.weight_decay = weight_decay
 
     @jax.jit
     def apply_grads(self, params: mod.BaseModule, grads: mod.BaseModule, state: OptState) -> tuple[mod.BaseModule, OptState]:
         step = state.train_iter + 1
         lr = self.lr_func(step)
+        grads = self._apply_weight_decay(params, grads)
         updates, state = self._update_opt_state(grads, state)
         new_params = jax.tree_util.tree_map(
             lambda p, u: p - lr*u, params, updates
         )
         return new_params, state
 
-    def _update_opt_state(self, grads, state: OptState) -> OptState:
+    def _apply_weight_decay(self, params, grads) -> mod.BaseModule:
+        def decay(p, g):
+            return jnp.where(p.ndim >= 2, g + self.weight_decay*p, g)
+
+        grads = jax.tree_util.tree_map(
+            decay, params, grads
+        )
+        return grads
+
+    def _update_opt_state(self, grads, state: OptState) -> tuple[mod.BaseModule, OptState]:
         # t <- t +1
         # m <- (beta1*m + (1-beta1)*grad) / (1-beta1^t)
         # v <- (beta2*v + (1-beta2)*grad^2) / (1-beta2^t)
@@ -62,38 +74,40 @@ class Adam(object):
         def update_momentum(m, g):
             g = jnp.clip(g, -self.clip, self.clip)
             m = self.beta1*m + (1-self.beta1)*g
-            return m / (1 - jnp.power(self.beta1, t))
+            return m
         
         def update_velocity(v, g):
             g = jnp.clip(g, -self.clip, self.clip)
             v = self.beta2*v + (1-self.beta2)*(jnp.power(g, 2))
-            return v / (1 - jnp.power(self.beta2, t))
-
-        grad_leaves, grad_tree_def = jax.tree_util.tree_flatten(grads)
+            return v
 
         # TODO: it would be nice if both of these could be done together
         new_momentum = jax.tree_util.tree_map(
-            update_momentum, state.momentums, grad_leaves
+            update_momentum, state.momentums, grads
         )
         new_velocity = jax.tree_util.tree_map(
-            update_velocity, state.velocities, grad_leaves
+            update_velocity, state.velocities, grads
         )
         state = OptState(t, new_momentum, new_velocity)
 
         # gradient update is
         # p <- p - lr*m/(sqrt(v) + eps)
-        # compute this on the momentum/velocity lists
-        # and create as the grad tree type (which is the 'Model' type)
+        # scalar here is the bias correction term that -> 1 as t -> inf
+        # it's done here as since beta2 is close to 1, 1/(1-beta2**t) can be large for small t and
+        # lead to incorrect updates
+        scalar = jnp.sqrt(1 - self.beta2**t) / (1 - self.beta1**t)
         grad_updates = jax.tree_util.tree_map(
-            lambda m, v: m/(jnp.sqrt(v)+10e-8), new_momentum, new_velocity
+            lambda m, v: scalar * (m/(jnp.sqrt(v)+10e-8)), new_momentum, new_velocity
         )
-        grad_updates = jax.tree_util.tree_unflatten(grad_tree_def, grad_updates)
         return grad_updates, state
     
     def init_state(self, dummy_params: jax.Array) -> OptState:
-        param_leaves, _ = jax.tree_util.tree_flatten(dummy_params)
-        mo = [jnp.zeros_like(l) for l in param_leaves]
-        ve = [jnp.zeros_like(l) for l in param_leaves]
+        mo = jax.tree_util.tree_map(
+            jnp.zeros_like, dummy_params
+        )
+        ve = jax.tree_util.tree_map(
+            jnp.zeros_like, dummy_params
+        )
         return OptState(train_iter=0, momentums=mo, velocities=ve)
     
     def tree_flatten(self):

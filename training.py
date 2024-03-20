@@ -5,7 +5,7 @@ from functools import partial
 
 from data import TrainingDataset
 from model import JaxFormer
-from opt import Adam, VanillaSGD, OptState, cosine_lr_decay, standard_lr
+from opt import Adam, OptState, cosine_lr_decay
 from loss import cross_entropy_loss
 
 
@@ -27,12 +27,13 @@ HEADS = 6
 HIDDEN_DIM = 4*MODEL_DIM
 DROPOUT_PROB = 0.2
 
-BASE_LR = 0.01
-MIN_LR = BASE_LR / 100.
-WARMUP_ITERS = 300
-DECAY_ITERS = 3000
+BASE_LR = 0.001
+MIN_LR = BASE_LR / 10.
+WARMUP_ITERS = 100
+DECAY_ITERS = 2500
+WEIGHT_DECAY = 0.001
 
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 
 EVAL_ITERS = 10
 EVAL_FREQ = 100
@@ -43,7 +44,7 @@ FREQ = 10
 def update_step(model: JaxFormer, optim: Adam, opt_state: OptState, X: jax.Array, Y: jax.Array, rng: jax.Array) -> tuple[jax.Array, JaxFormer, OptState]:
 
     def _loss(model, X):
-        pred = model(X, mask=True, train=True, rng=rng)
+        pred = model(X, train=True, rng=rng)
         return cross_entropy_loss(pred, Y)
     
     loss, grads = jax.value_and_grad(_loss)(model, X)
@@ -55,26 +56,31 @@ def validation_loss(ds: TrainingDataset, model: JaxFormer, iterations: int, rng:
     for k in range(iterations):
         rng, ds_rng = jax.random.split(rng)
         X, Y = ds.get_batch(ds_rng, BATCH_SIZE, MAX_SEQ_LEN, "val")
-        logits = model(X, mask=False, train=False, rng=None)
+        logits = model(X, train=False)
         loss = cross_entropy_loss(logits, Y)
         losses = losses.at[k].set(loss)
 
     return losses.mean()
 
-def generate(model, start: str, encoder, decoder, rng: jax.Array):
-    output = encoder(start)
+def generate(model, start: str, encoder, decoder, rng: jax.Array, num: int):
+    '''
+    This function should take in an array of tokens of shape (1, MAX_SEQ_LEN)
+    This is a mild hack because otherwise we retrace the model call function
+    for every new input shape
+    TODO: could use pad tokens here?
+    '''
+    tokens = start
 
-    while len(output) < MAX_SEQ_LEN:
+    for _ in range(num):
         rng, new = jax.random.split(rng)
-        batch = jnp.expand_dims(jnp.array(output), axis=0)
-        preds = model(batch, mask=False)
+        tokens = tokens[:, -num:]
+        preds = model(tokens, train=False)
         # preds (1, seq_len, vocab_size)
-        preds = preds[:, [-1], :]
+        preds = preds[:, -1, :]
         choice = jax.random.categorical(new, preds, axis=-1) # this applies softmax
-        tok = choice[0][0]
-        output.append(tok)
+        tokens = jnp.append(tokens, jnp.expand_dims(choice, axis=0), axis=1)
 
-    return decoder(output)
+    return decoder(tokens[0])
 
 
 
@@ -90,16 +96,14 @@ if __name__ == "__main__":
 
     jax_model = JaxFormer.init(model_key, MAX_SEQ_LEN, vocab_size, MODEL_DIM, 
                                NUM_TRANSFORMER_BLOCKS, HEADS, HIDDEN_DIM, DROPOUT_PROB)
-    
-    dummy_model_params = jax.tree_util.tree_leaves(jax_model)
 
     lr_decay = cosine_lr_decay(BASE_LR, MIN_LR, WARMUP_ITERS, DECAY_ITERS)
-    #optim = Adam(lr_decay)
-    optim = VanillaSGD(lr_decay)
-    opt_state = optim.init_state(dummy_model_params)
+    optim = Adam(lr_decay, grad_clip=1.0, weight_decay=WEIGHT_DECAY)
+    opt_state = optim.init_state(jax_model)
 
-    losses = jnp.zeros((FREQ,))
-    
+    freq_losses = jnp.zeros((FREQ,))
+    step_losses = jnp.array([])
+    val_losses = jnp.array([])
 
     step = 0
     while step < NUM_STEPS:
@@ -107,23 +111,19 @@ if __name__ == "__main__":
         X, Y = ds.get_batch(ds_key, BATCH_SIZE, MAX_SEQ_LEN)
 
         loss, jax_model, opt_state = update_step(jax_model, optim, opt_state, X, Y, update_key)
+        step_losses = jnp.append(step_losses, loss)
 
 
         if step > 0 and step%FREQ == 0:
-            print(f"Step: {step}. Loss over last {FREQ} steps: {jnp.mean(losses):.4f}")
+            print(f"Step: {step}. Loss over last {FREQ} steps: {jnp.mean(freq_losses):.4f}")
         
-        losses = losses.at[step%FREQ].set(loss)
+        freq_losses = freq_losses.at[step%FREQ].set(loss)
 
         if step > 0 and step%EVAL_FREQ == 0:
             rng, val_key = jax.random.split(rng)
             val_loss = validation_loss(ds, jax_model, EVAL_ITERS, val_key)
+            val_losses = jnp.append(val_losses, val_loss)
             print(f"Validation Loss: {val_loss:.4f}")
 
         step += 1
 
-    enc = ds.encoder()
-    dec = ds.decoder()
-    start = '\n'
-    
-    output = generate(jax_model, start, enc, dec, rng)
-    print(output)

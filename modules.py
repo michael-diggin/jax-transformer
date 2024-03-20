@@ -5,7 +5,7 @@ from functools import partial
 
 
 '''
-Need a better way to handle the 'params'
+Need a better way to handle the 'params' (model trainable variables)
 Currently ~okay but quite fragile (eg ordering matters)
 Could use a dictionary in some way
 '''
@@ -67,7 +67,7 @@ class Embedding(BaseModule):
     
     @classmethod
     def init(cls, rng: jax.Array, max_seq_len: int, embedding_dim: int, vocab_size: int):
-        embedding = jax.random.normal(rng, (vocab_size, embedding_dim)) / jnp.sqrt(embedding_dim) # TODO: check this init
+        embedding = jax.random.normal(rng, (vocab_size, embedding_dim)) * 0.02 #/ jnp.sqrt(embedding_dim) # TODO: check this init
         pos_encoding = cls.create_pe(max_seq_len, embedding_dim)
         return cls(embedding, pos_encoding)
     
@@ -97,7 +97,7 @@ class Dense(BaseModule):
     
     @classmethod
     def init(cls, rng: jax.Array, input: int, features: int):
-        weights = jax.random.normal(rng, (input, features)) / jnp.sqrt(input)
+        weights = jax.random.normal(rng, (input, features)) * 0.02 #/ jnp.sqrt(input)
         bias = jnp.zeros((features,))
         return cls(weights, bias)
 
@@ -125,8 +125,8 @@ class LayerNorm(BaseModule):
     @classmethod
     def init(cls, d_model: int, eps: int = 10e-09):
         # initialized with 1 and 0
-        lambda_p = jnp.ones((1, d_model))
-        beta_p = jnp.zeros((1, d_model))
+        lambda_p = jnp.ones((d_model,))
+        beta_p = jnp.zeros((d_model,))
         return cls(lambda_p, beta_p, eps)
     
 @register_pytree_node_class
@@ -171,8 +171,8 @@ class MultiHeadAttention(BaseModule):
     def aux_data(self) -> jax.Array:
         return self.heads
     
-    @partial(jax.jit, static_argnames=["mask", "train"])
-    def __call__(self, x: jax.Array, mask: bool = False, train: bool = False, rng: jax.Array = None) -> jax.Array:
+    @partial(jax.jit, static_argnames=["train"])
+    def __call__(self, x: jax.Array, train: bool = False, rng: jax.Array = None) -> jax.Array:
         # x is (batch size, seq_len, d_model)
         batch, seq_len, d_model = jnp.shape(x)
         q = self.W_q(x).reshape(batch, seq_len, self.heads, -1) # (batch, seq_len, heads, d_k)
@@ -182,18 +182,17 @@ class MultiHeadAttention(BaseModule):
         q = q.transpose(0, 2, 1, 3) # (batch, heads, seq_len, d_k)
         k = k.transpose(0, 2, 1, 3) # (batch, heads, seq_len, d_k)
         v = v.transpose(0, 2, 1, 3) # (batch, heads, seq_len, d_k)
-        attn = self.scaled_dot_product(q, k, v, d_model // self.heads, mask, train, rng) # (batch, heads, seq_len, d_k)
+        attn = self.scaled_dot_product(q, k, v, d_model // self.heads, train, rng) # (batch, heads, seq_len, d_k)
         attn = attn.transpose(0, 2, 1, 3) # (batch, seq_len, heads, d_k)
         attn = attn.reshape(batch, seq_len, d_model)
         attn_o = self.W_o(attn) # (batch, seq_len, d_model)
         return attn_o
 
-    def scaled_dot_product(self, q: jax.Array, k: jax.Array, v: jax.Array, d_k: jax.Array, mask: bool, train: bool, rng: jax.Array) -> jax.Array:
+    def scaled_dot_product(self, q: jax.Array, k: jax.Array, v: jax.Array, d_k: jax.Array, train: bool, rng: jax.Array) -> jax.Array:
         # q, v, k have dim (batch, heads, seq_len, d_k)
         attn = jnp.matmul(q, jnp.swapaxes(k, -2, -1)) / jnp.sqrt(d_k) # (batch, heads, seq_len, seq_len)
-        if mask:
-            m_array = self.get_training_mask(q.shape[2])
-            attn = jnp.where(m_array, attn, -9e15)
+        m_array = self.get_training_mask(q.shape[2])
+        attn = jnp.where(m_array, attn, -9e15)
         attn = jax.nn.softmax(attn, axis=-1)
         attn = self.drop(attn, train, rng)
         return jnp.matmul(attn, v) # (batch, heads, seq_len, d_k)
@@ -234,8 +233,8 @@ class Transformer(BaseModule):
     def params(self) -> jax.Array:
         return [self.mha, self.norm1, self.norm2, self.dense1, self.dense2, self.dropout1, self.dropout2]
 
-    @partial(jax.jit, static_argnames=["mask", "train"])
-    def __call__(self, x: jax.Array, mask: jax.Array, train: bool = False, rng: jax.Array = None) -> jax.Array:
+    @partial(jax.jit, static_argnames=["train"])
+    def __call__(self, x: jax.Array, train: bool = False, rng: jax.Array = None) -> jax.Array:
         '''
         compute attention with MHA
         residual add + layer norm
@@ -248,12 +247,12 @@ class Transformer(BaseModule):
         if train:
             rng1, rng2, rng3 = jax.random.split(rng, 3)
         x = self.norm1(x)
-        attn = self.mha(x, mask, train, rng1)
+        attn = self.mha(x, train, rng1)
         attn = self.dropout1(attn, train, rng2)
         x = self.norm2(x + attn)
 
         ff_out = self.dense1(x)
-        ff_out = jax.nn.gelu(ff_out) # TODO: a different activation func?
+        ff_out = jax.nn.gelu(ff_out)
         ff_out = self.dense2(ff_out)
         ff_out = self.dropout2(ff_out, train, rng3)
 
