@@ -19,8 +19,11 @@ Other bits to do:
 - Implement data prep object (Done)
 - Implement training loops with validation (Done)
 - Implement regularisation with weight decay (Done)
-- Optionally remove bias parameters
-- Implement custom kernel init
+- Optionally remove bias parameters (Done)
+- Implement custom kernel init (Done)
 - Saving/checkpointing model weights and optimizer state
 - Implement KV caching for fast decoding
 - Profile and see what can be improved/made faster and see what gets recompiled unnecessarily
+
+
+10697537 # of params ~ 10.7M parameters

@@ -66,8 +66,8 @@ class Embedding(BaseModule):
         return x
     
     @classmethod
-    def init(cls, rng: jax.Array, max_seq_len: int, embedding_dim: int, vocab_size: int):
-        embedding = jax.random.normal(rng, (vocab_size, embedding_dim)) * 0.02 #/ jnp.sqrt(embedding_dim) # TODO: check this init
+    def init(cls, rng: jax.Array, max_seq_len: int, embedding_dim: int, vocab_size: int, kernel_std: float = 1.):
+        embedding = jax.random.normal(rng, (vocab_size, embedding_dim)) * kernel_std
         pos_encoding = cls.create_pe(max_seq_len, embedding_dim)
         return cls(embedding, pos_encoding)
     
@@ -83,51 +83,57 @@ class Embedding(BaseModule):
     
 @register_pytree_node_class
 class Dense(BaseModule):
-    def __init__(self, weights: jax.Array, bias: jax.Array, *args) -> None:
+    def __init__(self, weights: jax.Array, bias: jax.Array, with_bias: bool, *args) -> None:
         self.weights = weights
         self.bias =  bias
+        self.with_bias = with_bias
 
     def params(self) -> list[jax.Array]:
         return [self.weights, self.bias]
     
+    def aux_data(self) -> jax.Array:
+        return self.with_bias
+    
     @jax.jit
     @partial(jax.vmap, in_axes=(None, 0), out_axes=0)
     def __call__(self, x) -> jax.Array:
-        return jnp.matmul(x, self.weights) + self.bias
+        x = jnp.matmul(x, self.weights)
+        return jnp.where(self.with_bias, x+self.bias, x)
     
     @classmethod
-    def init(cls, rng: jax.Array, input: int, features: int):
-        weights = jax.random.normal(rng, (input, features)) * 0.02 #/ jnp.sqrt(input)
+    def init(cls, rng: jax.Array, input: int, features: int, kernel_std: float = 1., with_bias: bool = True):
+        weights = jax.random.normal(rng, (input, features)) * kernel_std
         bias = jnp.zeros((features,))
-        return cls(weights, bias)
+        return cls(weights, bias, with_bias)
 
 @register_pytree_node_class
 class LayerNorm(BaseModule):
-    def __init__(self, learned_lambda: jax.Array, learned_beta: jax.Array, eps: jax.Array, *args) -> None:
+    def __init__(self, learned_lambda: jax.Array, learned_beta: jax.Array, aux_data, *args) -> None:
         self.learned_lambda = learned_lambda
         self.learned_beta = learned_beta
-        self.eps = eps
+        self.eps = aux_data[0]
+        self.with_bias = aux_data[1]
 
     def params(self) -> list[jax.Array]:
         return [self.learned_lambda, self.learned_beta]
     
-    def aux_data(self) -> jax.Array:
-        return self.eps
+    def aux_data(self) -> list[jax.Array]:
+        return [self.eps, self.with_bias]
     
     @jax.jit
     @partial(jax.vmap, in_axes=(None, 0), out_axes=0)
     def __call__(self, x) -> jax.Array:
         mean = jnp.mean(x)
         var = jnp.var(x)
-        out = ((x - mean) / jnp.sqrt(var + self.eps)) * self.learned_lambda + self.learned_beta
-        return out
+        out = ((x - mean) / jnp.sqrt(var + self.eps)) * self.learned_lambda
+        return jnp.where(self.with_bias, out + self.learned_beta, out)
 
     @classmethod
-    def init(cls, d_model: int, eps: int = 10e-09):
+    def init(cls, d_model: int, eps: int = 10e-09, with_bias: bool = True):
         # initialized with 1 and 0
         lambda_p = jnp.ones((d_model,))
         beta_p = jnp.zeros((d_model,))
-        return cls(lambda_p, beta_p, eps)
+        return cls(lambda_p, beta_p, [eps, with_bias])
     
 @register_pytree_node_class
 class Dropout(BaseModule):
@@ -206,14 +212,14 @@ class MultiHeadAttention(BaseModule):
         return jnp.expand_dims(mask, (0, 1))
 
     @classmethod
-    def init(cls, rng: jax.Array, heads: int, d_model: int, drop_rate: jax.Array):
+    def init(cls, rng: jax.Array, heads: int, d_model: int, drop_rate: jax.Array, kernel_std: float = 1., with_bias: bool =True):
         # create all proj matrices, have d_keys = d_vals
         assert d_model % heads == 0, "Heads must divide the model dimension evenly"
         rng, q_key, k_key, v_key, o_key = jax.random.split(rng, 5)
-        W_q = Dense.init(q_key, d_model, d_model)
-        W_k = Dense.init(k_key, d_model, d_model)
-        W_v = Dense.init(v_key, d_model, d_model)
-        W_o = Dense.init(o_key, d_model, d_model)
+        W_q = Dense.init(q_key, d_model, d_model, kernel_std, with_bias)
+        W_k = Dense.init(k_key, d_model, d_model, kernel_std, with_bias)
+        W_v = Dense.init(v_key, d_model, d_model, kernel_std, with_bias)
+        W_o = Dense.init(o_key, d_model, d_model, kernel_std, with_bias)
         drop = Dropout.init(drop_rate)
         return cls(W_q, W_k, W_v, W_o, drop, heads)
     
@@ -259,13 +265,13 @@ class Transformer(BaseModule):
         return x + ff_out
 
     @classmethod
-    def init(cls, rng: jax.Array, d_model: int, heads: int, hidden_dim: int, dropout_prob: int):
+    def init(cls, rng: jax.Array, d_model: int, heads: int, hidden_dim: int, dropout_prob: int, kernel_std: float = 1., with_bias: bool = True):
         rng, mha_key, dense1_key, dense2_key = jax.random.split(rng, 4)
-        mha = MultiHeadAttention.init(mha_key, heads, d_model, dropout_prob)
-        dense1 = Dense.init(dense1_key, d_model, hidden_dim)
-        dense2 = Dense.init(dense2_key, hidden_dim, d_model)
-        ln1 = LayerNorm.init(d_model)
-        ln2 = LayerNorm.init(d_model)
+        mha = MultiHeadAttention.init(mha_key, heads, d_model, dropout_prob, kernel_std, with_bias)
+        dense1 = Dense.init(dense1_key, d_model, hidden_dim, kernel_std, with_bias)
+        dense2 = Dense.init(dense2_key, hidden_dim, d_model, kernel_std, with_bias)
+        ln1 = LayerNorm.init(d_model, with_bias=with_bias)
+        ln2 = LayerNorm.init(d_model, with_bias=with_bias)
         drop1 = Dropout.init(dropout_prob)
         drop2 = Dropout.init(dropout_prob)
         return cls(mha, ln1, ln2, dense1, dense2, drop1, drop2)

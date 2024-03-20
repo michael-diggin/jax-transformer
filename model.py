@@ -34,15 +34,15 @@ class JaxFormer(mod.BaseModule):
 
     @classmethod
     def init(cls, rng: jax.Array, max_seq_len: int, vocab_size: int, d_model: int,
-            num_blocks: int, heads: int, hidden_dim: int, dropout_prob: int):
+            num_blocks: int, heads: int, hidden_dim: int, dropout_prob: int, kernel_std: float = 0.02, with_bias: bool = True):
         rng, e_key, dense_key = jax.random.split(rng, 3)
-        embed = mod.Embedding.init(e_key, max_seq_len, d_model, vocab_size)
+        embed = mod.Embedding.init(e_key, max_seq_len, d_model, vocab_size, kernel_std)
         drop = mod.Dropout.init(dropout_prob)
         d_blocks = []
         for _ in range(num_blocks):
             rng, block_key = jax.random.split(rng)
-            d_blocks.append(mod.Transformer.init(block_key, d_model, heads, hidden_dim, dropout_prob))
-        norm = mod.LayerNorm.init(d_model)
-        lm_head = mod.Dense.init(dense_key, d_model, vocab_size)
+            d_blocks.append(mod.Transformer.init(block_key, d_model, heads, hidden_dim, dropout_prob, kernel_std, with_bias))
+        norm = mod.LayerNorm.init(d_model, with_bias=with_bias)
+        lm_head = mod.Dense.init(dense_key, d_model, vocab_size, kernel_std, with_bias)
         embed.embedding = jnp.transpose(lm_head.weights) # weight tying
         return cls(embed, drop, d_blocks, norm, lm_head)
