@@ -1,29 +1,38 @@
 # jax-transformer
 A transformer implemented naively in Jax
 
-Jax is very functional programming based, so create Modules (without copying Flax)
-that achieve 'storing' parameters and variables in a nice way that work with Jax
-and make training easy to follow
-Models are a stack of Modules (eg layers) which, 
-given a set of params/variables and input, give an ouput. 
-Then construct a loss, collect grads and update the params/variables. 
-Repeat until done. 
+## Description
+This repo has code for a very small character level GPT (~10.7M parameters) implemented purely in [Jax](https://jax.readthedocs.io/en/latest/index.html), no
+Flax/Haiku etc from the strong Jax ecosystem used at all.
+
+This includes all neural network modules (Dense, Embedding, Droupout, LayerNorm, Multihead Attention), optimizer (Adam with gradient clipping and weight decay) and loss function (with warmup and decay).
+Jax uses a functional based approach which was really interesting and quite different to other low level libraries and ML frameworks.
+
+The nn modules here are implemented as Python Classes that become PyTrees in Jax, which are essentially containers to hold the module parameters and a call function on how to use these parameters.
+
+## Results
+This GPT (in model.py with all the parameters in training.py) was trainined at a character level using a dataset of all text from Shakespeare's work. After a short peiod of training it could generate output such as
+
+```text
+KING EDWARD ICHARD:
+Hast! I willl mounstion.
+
+LEONTHUS:
+May,
+I may be sirt From me horse the brut care, be award,
+And there who childs every I'll.
+
+JULIET:
+The dear, my livest: whell Herefors; foul the die the to I setet moy
+By back in busst of the heave i
+```
+
+Which, if you squint hard enough, isn't too far off. The validation loss was around ~1.78:
+
+![validation loss](assets/val_loss.png)
 
 
-Other bits to do:
-- Implement Dropout (Done)
-- Implement Adam optimizer (Done)
-- Implement gradient clipping (Done)
-- Implement LR warmup and decay (Done)
-- Define loss function (Done)
-- Implement data prep object (Done)
-- Implement training loops with validation (Done)
-- Implement regularisation with weight decay (Done)
-- Optionally remove bias parameters (Done)
-- Implement custom kernel init (Done)
+### A few other bits left to do:
 - Saving/checkpointing model weights and optimizer state
 - Implement KV caching for fast decoding
 - Profile and see what can be improved/made faster and see what gets recompiled unnecessarily
-
-
-10697537 # of params ~ 10.7M parameters
