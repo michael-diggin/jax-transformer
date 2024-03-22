@@ -35,7 +35,7 @@ class VanillaSGD:
     def init_state(self, dummy_params) -> OptState:
         return OptState(train_iter=0)
 
-# TODO: this only needs to be a pytree for tracing reasons, see if there's a better way to achieve this
+
 @register_pytree_node_class
 class Adam(object):
     def __init__(self, lr_func, beta1: jax.Array = 0.9, beta2: jax.Array = 0.99,
@@ -81,7 +81,6 @@ class Adam(object):
             v = self.beta2*v + (1-self.beta2)*(jnp.power(g, 2))
             return v
 
-        # TODO: it would be nice if both of these could be done together
         new_momentum = jax.tree_util.tree_map(
             update_momentum, state.momentums, grads
         )

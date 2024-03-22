@@ -41,7 +41,7 @@ class JaxFormer(mod.BaseModule):
         d_blocks = []
         for _ in range(num_blocks):
             rng, block_key = jax.random.split(rng)
-            d_blocks.append(mod.Transformer.init(block_key, d_model, heads, hidden_dim, dropout_prob, kernel_std, with_bias))
+            d_blocks.append(mod.Transformer.init(block_key, d_model, heads, hidden_dim, max_seq_len, dropout_prob, kernel_std, with_bias))
         norm = mod.LayerNorm.init(d_model, with_bias=with_bias)
         lm_head = mod.Dense.init(dense_key, d_model, vocab_size, kernel_std, with_bias)
         embed.embedding = jnp.transpose(lm_head.weights) # weight tying

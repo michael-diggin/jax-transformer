@@ -1,5 +1,7 @@
 import jax
+from jax import vmap, lax
 import jax.numpy as jnp
+from functools import partial
 '''
 Utility function to fetch information like
 char <-> int mappings, get the vocab,
@@ -53,29 +55,31 @@ class TrainingDataset:
         train_split = self.data[:n]
         val_split = self.data[n:]
         enc = self.encoder()
-        self._train_data = enc(train_split)
-        self._val_data = enc(val_split)
+        self._train_data = jnp.array(enc(train_split))
+        self._val_data = jnp.array(enc(val_split))
     
-    # TODO: implement a way to iterate a way through the training data for epoch based training
     def get_batch(self, rng: jax.Array, batch_size: int, seq_len: int, split: str = "train") -> tuple[list[int], list[int]]:
         '''
         get_batch fetches the next `batch_size` of examples, each of `seq_len` in length.
         Each example is chosen randomly from the dataset.
         Use `split` to choose between the training set and the validation set
         '''
-        if not self._train_data:
+        if self._train_data is None:
             self._train_val_split()
 
         data = {"train": self._train_data, "val": self._val_data}.get(split, None)
-        if not data:
+        if data is None:
             raise Exception("Split must be one of train or val")
 
         size = len(data)
         offsets = jax.random.randint(rng, (batch_size,), 0, size-seq_len)
-        # TODO: this could be done with jax.vmap I think
-        xs = jnp.stack([jnp.array(data[int(offset):int(offset)+seq_len]) for offset in offsets], axis=0)
-        ys = jnp.stack([jnp.array(data[int(offset)+1:int(offset)+1+seq_len]) for offset in offsets], axis=0)
+        xs = get_slice(data, offsets, seq_len)
+        ys = get_slice(data, offsets+1, seq_len)
         return xs, ys
+    
+@partial(vmap, in_axes=(None, 0, None), out_axes=0)
+def get_slice(arr: jax.Array, offset: jax.Array, seq_len: int):
+  return lax.dynamic_slice(arr, (offset,), (seq_len,))
     
 
 

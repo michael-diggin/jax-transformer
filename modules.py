@@ -163,19 +163,20 @@ class Dropout(BaseModule):
 
 @register_pytree_node_class
 class MultiHeadAttention(BaseModule):
-    def __init__(self, W_q: Dense, W_k: Dense, W_v: Dense, W_o: Dense, drop: Dropout, heads: int, *args) -> None:
+    def __init__(self, W_q: Dense, W_k: Dense, W_v: Dense, W_o: Dense, drop: Dropout, aux_data, *args) -> None:
         self.W_q = W_q
         self.W_k = W_k
         self.W_v = W_v
         self.W_o = W_o
         self.drop = drop
-        self.heads = heads
+        self.heads = aux_data[0]
+        self.mask = aux_data[1]
 
     def params(self) -> list[jax.Array]:
         return [self.W_q, self.W_k, self.W_v, self.W_o, self.drop]
     
     def aux_data(self) -> jax.Array:
-        return self.heads
+        return [self.heads, self.mask]
     
     @partial(jax.jit, static_argnames=["train"])
     def __call__(self, x: jax.Array, train: bool = False, rng: jax.Array = None) -> jax.Array:
@@ -197,13 +198,13 @@ class MultiHeadAttention(BaseModule):
     def scaled_dot_product(self, q: jax.Array, k: jax.Array, v: jax.Array, d_k: jax.Array, train: bool, rng: jax.Array) -> jax.Array:
         # q, v, k have dim (batch, heads, seq_len, d_k)
         attn = jnp.matmul(q, jnp.swapaxes(k, -2, -1)) / jnp.sqrt(d_k) # (batch, heads, seq_len, seq_len)
-        m_array = self.get_training_mask(q.shape[2])
-        attn = jnp.where(m_array, attn, -9e15)
+        attn = jnp.where(self.mask, attn, -9e15)
         attn = jax.nn.softmax(attn, axis=-1)
         attn = self.drop(attn, train, rng)
         return jnp.matmul(attn, v) # (batch, heads, seq_len, d_k)
 
-    def get_training_mask(self, seq_len: int) -> jax.Array:
+    @classmethod
+    def get_training_mask(cls, seq_len: int) -> jax.Array:
         '''
         Returns a (1, 1, seq_len, seq_len) lower trinagular mask
         that can be used in training
@@ -212,7 +213,7 @@ class MultiHeadAttention(BaseModule):
         return jnp.expand_dims(mask, (0, 1))
 
     @classmethod
-    def init(cls, rng: jax.Array, heads: int, d_model: int, drop_rate: jax.Array, kernel_std: float = 1., with_bias: bool =True):
+    def init(cls, rng: jax.Array, heads: int, d_model: int, max_seq_len: int, drop_rate: jax.Array, kernel_std: float = 1., with_bias: bool =True):
         # create all proj matrices, have d_keys = d_vals
         assert d_model % heads == 0, "Heads must divide the model dimension evenly"
         rng, q_key, k_key, v_key, o_key = jax.random.split(rng, 5)
@@ -221,7 +222,8 @@ class MultiHeadAttention(BaseModule):
         W_v = Dense.init(v_key, d_model, d_model, kernel_std, with_bias)
         W_o = Dense.init(o_key, d_model, d_model, kernel_std, with_bias)
         drop = Dropout.init(drop_rate)
-        return cls(W_q, W_k, W_v, W_o, drop, heads)
+        mask = cls.get_training_mask(max_seq_len)
+        return cls(W_q, W_k, W_v, W_o, drop, heads, mask)
     
 @register_pytree_node_class
 class Transformer(BaseModule):
@@ -265,9 +267,9 @@ class Transformer(BaseModule):
         return x + ff_out
 
     @classmethod
-    def init(cls, rng: jax.Array, d_model: int, heads: int, hidden_dim: int, dropout_prob: int, kernel_std: float = 1., with_bias: bool = True):
+    def init(cls, rng: jax.Array, d_model: int, heads: int, hidden_dim: int, max_seq_len: int, dropout_prob: int, kernel_std: float = 1., with_bias: bool = True):
         rng, mha_key, dense1_key, dense2_key = jax.random.split(rng, 4)
-        mha = MultiHeadAttention.init(mha_key, heads, d_model, dropout_prob, kernel_std, with_bias)
+        mha = MultiHeadAttention.init(mha_key, heads, d_model, max_seq_len, dropout_prob, kernel_std, with_bias)
         dense1 = Dense.init(dense1_key, d_model, hidden_dim, kernel_std, with_bias)
         dense2 = Dense.init(dense2_key, hidden_dim, d_model, kernel_std, with_bias)
         ln1 = LayerNorm.init(d_model, with_bias=with_bias)
