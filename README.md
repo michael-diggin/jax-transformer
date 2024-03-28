@@ -1,5 +1,5 @@
 # jax-transformer
-A transformer implemented naively in Jax
+A transformer implemented purely in Jax
 
 ## Description
 This repo has code for a very small character level GPT (~10.7M parameters) implemented purely in [Jax](https://jax.readthedocs.io/en/latest/index.html), no
